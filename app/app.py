@@ -137,35 +137,17 @@ def plot_candles(df: pd.DataFrame, title: str):
         xaxis_title="Time",
         yaxis_title="Price",
         xaxis_rangeslider_visible=False,
-        height=400,
+        height=450,
         margin=dict(t=40, l=10, r=10, b=10),
+        xaxis=dict(
+            type="date",
+            tickformat="%H:%M",
+            tickangle=-45,
+            ticks="outside",
+            showgrid=False,
+        ),
     )
     st.plotly_chart(fig, use_container_width=True)
-
-
-def describe_last_candle(row) -> str:
-    o = row["open"]
-    c = row["close"]
-    h = row["high"]
-    l = row["low"]
-
-    if c > o:
-        typ = "Bullish (green) candle"
-        dir_text = "price CLOSED HIGHER than it opened."
-    elif c < o:
-        typ = "Bearish (red) candle"
-        dir_text = "price CLOSED LOWER than it opened."
-    else:
-        typ = "Doji (flat) candle"
-        dir_text = "price closed at the SAME level as it opened."
-
-    return (
-        f"Open:  {o:.5f}\n"
-        f"High:  {h:.5f}\n"
-        f"Low:   {l:.5f}\n"
-        f"Close: {c:.5f}\n\n"
-        f"This is a **{typ}** → {dir_text}"
-    )
 
 
 @st.cache_data
@@ -244,7 +226,7 @@ with col_left:
     )
 
     if not api_key:
-        st.error("API key not found or empty in api.txt (expected at ../api.txt).")
+        st.error("API key not found or empty in api.txt (expected at api.txt).")
     else:
         st.success("API key loaded from file.")
 
@@ -255,8 +237,8 @@ with col_left:
     if acc is None or f1 is None:
         st.write("Metrics not available (check model and data files).")
     else:
-        st.write(f"**Accuracy:** {acc:.2%}")
-        st.write(f"**F1 Score:** {f1:.3f}")
+        st.write(f"Accuracy: {acc:.2%}")
+        st.write(f"F1 Score: {f1:.3f}")
 
     st.write("Model is trained on historical data for this timeframe.")
     go_button = st.button("🔃 Fetch data & Predict")
@@ -265,7 +247,7 @@ with col_right:
     st.markdown(f"## {SYMBOL} – Live Prediction")
 
     if not api_key:
-        st.info("Fix API key file, then press **Fetch data & Predict**.")
+        st.info("Fix API key file, then press 'Fetch data & Predict'.")
     elif go_button:
         cfg = TIMEFRAME_CONFIG[timeframe]
 
@@ -295,10 +277,46 @@ with col_right:
 
                     label, confidence, pred_class = predict_direction(model, X_live)
 
-                    # last completed raw candle for explanation
+                    # last completed raw candle info
                     last_price_row = df_live.iloc[-1]
                     last_price = last_price_row["close"]
                     last_time = last_price_row["timestamp"]
+
+                    # estimate volatility from recent ranges
+                    recent_ranges = (df_live["high"] - df_live["low"]).tail(20)
+                    avg_range = recent_ranges.mean()
+                    if pd.isna(avg_range) or avg_range <= 0:
+                        avg_range = (df_live["high"] - df_live["low"]).mean()
+                    if pd.isna(avg_range) or avg_range <= 0:
+                        avg_range = 0.0005  # fallback ~5 pips
+
+                    pip_factor = 10000.0
+                    sl_dist = avg_range               # in price
+                    tp_dist = 2.0 * avg_range         # 2:1 R:R
+
+                    tp_pips = tp_dist * pip_factor
+                    sl_pips = sl_dist * pip_factor
+
+                    # TP/SL prices depending on direction
+                    if "BUY" in label:
+                        tp_price = last_price + tp_dist
+                        sl_price = last_price - sl_dist
+                    else:  # SELL
+                        tp_price = last_price - tp_dist
+                        sl_price = last_price + sl_dist
+
+                    # heuristic expected high/low for next candle
+                    expected_high = max(last_price, tp_price)
+                    expected_low = min(last_price, sl_price)
+
+                    # breakout probability (reuse direction confidence)
+                    breakout_prob = confidence
+
+                    # expected profit / loss (in pips, based on TP/SL and confidence)
+                    expected_profit_pips = confidence * tp_pips
+                    expected_loss_pips = (1.0 - confidence) * sl_pips
+
+                    risk_to_reward = tp_pips / sl_pips if sl_pips > 0 else None
 
                     # prediction panel
                     sig_class = "buy" if "BUY" in label else "sell"
@@ -310,16 +328,27 @@ with col_right:
                         """,
                         unsafe_allow_html=True,
                     )
-                    st.write(f"**Confidence:** {confidence:.2%}")
-                    st.write(f"**Last price:** {last_price:.5f}")
-                    st.write(f"**Time (last candle):** {last_time}")
+                    st.write(f"Confidence: {confidence:.2%}")
+                    st.write(f"Last price: {last_price:.5f}")
+                    st.write(f"Time (last candle): {last_time}")
 
-                    st.markdown("#### Last completed candle (what just happened)")
-                    st.text(describe_last_candle(last_price_row))
+                    st.markdown("#### Next Candle & Trade Metrics (Heuristic)")
+                    st.write(f"Expected next candle high: {expected_high:.5f}")
+                    st.write(f"Expected next candle low: {expected_low:.5f}")
+                    st.write(f"Breakout probability (direction confidence): {breakout_prob:.2%}")
+
+                    st.write(f"Suggested TP price: {tp_price:.5f} (~{tp_pips:.1f} pips)")
+                    st.write(f"Suggested SL price: {sl_price:.5f} (~{sl_pips:.1f} pips)")
+
+                    st.write(f"Expected profit (pips): {expected_profit_pips:.1f}")
+                    st.write(f"Expected loss (pips): {expected_loss_pips:.1f}")
+                    if risk_to_reward is not None:
+                        st.write(f"Risk-to-Reward ratio: {risk_to_reward:.2f} : 1")
 
                     st.caption(
-                        "The model is trained on historical data for this timeframe "
-                        "and predicts the direction of the **next candle**."
+                        "Direction and confidence come from the trained ML model. "
+                        "Expected high/low, TP/SL, and expected P/L are heuristic estimates "
+                        "based on recent volatility and a 2:1 risk-to-reward assumption."
                     )
     else:
-        st.write("Choose timeframe and press **Fetch data & Predict**.")
+        st.write("Choose timeframe and press 'Fetch data & Predict'.")
